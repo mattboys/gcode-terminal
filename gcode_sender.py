@@ -98,6 +98,9 @@ class GCodeSender(tk.Tk):
         self.geometry("950x680")
         self.serial_port = None
         self.reader_active = False
+        self.command_history = []
+        self._history_index = 0
+        self._history_edit_buffer = ""
 
         self._build_ui()
 
@@ -189,6 +192,7 @@ class GCodeSender(tk.Tk):
         cmd = cmd.strip()
         if not cmd:
             return
+        self._add_to_history(cmd)
         if not self.serial_port or not self.serial_port.is_open:
             self._log("Not connected", "red")
             return
@@ -201,6 +205,42 @@ class GCodeSender(tk.Tk):
             self._log(f">>> {cmd}", "white")
         except Exception as e:
             self._log(f"Send error: {e}", "red")
+
+    def _add_to_history(self, cmd):
+        cmd = cmd.strip()
+        if not cmd:
+            return
+        if self.command_history and self.command_history[-1] == cmd:
+            return
+        self.command_history.append(cmd)
+        self._history_index = len(self.command_history)
+
+    def _navigate_history(self, direction):
+        if not self.command_history:
+            return "break"
+
+        if direction < 0:
+            if self._history_index >= len(self.command_history):
+                self._history_edit_buffer = self.cmd_var.get()
+                self._history_index = len(self.command_history) - 1
+            elif self._history_index > 0:
+                self._history_index -= 1
+            else:
+                self._history_index = 0
+        else:
+            if self._history_index < len(self.command_history):
+                if self._history_index == len(self.command_history) - 1:
+                    self._history_index = len(self.command_history)
+                    self.cmd_var.set(self._history_edit_buffer)
+                    return "break"
+                self._history_index += 1
+            else:
+                self._history_index = len(self.command_history)
+
+        if self._history_index < len(self.command_history):
+            self.cmd_var.set(self.command_history[self._history_index])
+
+        return "break"
 
     def _reader_loop(self):
         buf = ""
@@ -242,22 +282,24 @@ class GCodeSender(tk.Tk):
     def _build_terminal_panel(self, parent):
         ttk.Label(parent, text="Terminal", font=("Segoe UI", 10, "bold")).pack(anchor="w", padx=6, pady=(6, 0))
 
-        inp = ttk.Frame(parent)
-        inp.pack(fill="x", padx=6, pady=(4, 0))
-
-        self.cmd_var = tk.StringVar()
-        self.cmd_entry = ttk.Entry(inp, textvariable=self.cmd_var, font=("Consolas", 11))
-        self.cmd_entry.pack(side="left", fill="x", expand=True)
-        self.cmd_entry.bind("<Return>", lambda e: self._terminal_send())
-
-        ttk.Button(inp, text="Send", command=self._terminal_send).pack(side="left", padx=(6, 0))
-
         self.output = scrolledtext.ScrolledText(
             parent, state="disabled", font=("Consolas", 10),
             wrap="word", bg="#1e1e1e", fg="#d4d4d4",
             insertbackground="white",
         )
         self.output.pack(fill="both", expand=True, padx=6, pady=6)
+
+        inp = ttk.Frame(parent)
+        inp.pack(fill="x", padx=6, pady=(0, 6))
+
+        self.cmd_var = tk.StringVar()
+        self.cmd_entry = ttk.Entry(inp, textvariable=self.cmd_var, font=("Consolas", 11))
+        self.cmd_entry.pack(side="left", fill="x", expand=True)
+        self.cmd_entry.bind("<Return>", lambda e: self._terminal_send())
+        self.cmd_entry.bind("<Up>", lambda e: self._navigate_history(-1))
+        self.cmd_entry.bind("<Down>", lambda e: self._navigate_history(1))
+
+        ttk.Button(inp, text="Send", command=self._terminal_send).pack(side="left", padx=(6, 0))
 
         self.output.tag_config("white", foreground="#d4d4d4")
         self.output.tag_config("lime", foreground="#6a9955")
@@ -266,8 +308,13 @@ class GCodeSender(tk.Tk):
         self.output.tag_config("orange", foreground="#ce9178")
 
     def _terminal_send(self):
-        self._send_gcode(self.cmd_var.get())
+        cmd = self.cmd_var.get().strip()
+        if not cmd:
+            return
+        self._send_gcode(cmd)
         self.cmd_var.set("")
+        self._history_edit_buffer = ""
+        self._history_index = len(self.command_history)
 
     # ── Commands Panel ──
 
