@@ -324,6 +324,7 @@ class GCodeSender(tk.Tk):
         ttk.Label(header_frame, text="Commands", font=("Segoe UI", 10, "bold")).pack(side="left")
         ttk.Button(header_frame, text="Clear Output", command=self._clear_output).pack(side="right")
         ttk.Button(header_frame, text="Send Selected", command=lambda: self._send_selected(tree)).pack(side="right", padx=(0, 6))
+        ttk.Button(header_frame, text="Send File", command=self._send_file_dialog).pack(side="right", padx=(0, 6))
 
         outer = ttk.Frame(parent)
         outer.pack(fill="both", expand=True, padx=6, pady=6)
@@ -372,6 +373,41 @@ class GCodeSender(tk.Tk):
         vals = tree.item(item, "values")
         if vals:
             self._send_gcode(vals[0])
+
+
+    def _send_file_dialog(self):
+        from tkinter import filedialog
+        file_path = filedialog.askopenfilename(
+            title="Select G-code File",
+            filetypes=[("G-code files", "*.gcode"), ("All files", "*.* * ")]
+        )
+        if file_path:
+            self._log(f"Sending file: {file_path}", "orange")
+            threading.Thread(target=self._send_gcode_file, args=(file_path,), daemon=True).start()
+
+    def _send_gcode_file(self, file_path):
+        if not self.serial_port or not self.serial_port.is_open:
+            self._log("Not connected. Cannot send G-code file.", "red")
+            return
+
+        try:
+            with open(file_path, 'r') as f:
+                for line_num, line in enumerate(f, 1):
+                    line = line.strip()
+                    if not line or line.startswith(';') or line.startswith('%'):
+                        continue # Skip empty lines, comments, and program start/end markers
+                    # Strip comments
+                    line = line.split(";")[0].strip()
+                    # Basic buffering: send line by line and wait for response before sending next
+                    self._send_gcode(line)
+                    # A more robust solution would involve checking for 'ok' in the serial reader loop
+                    # and managing a send buffer. For now, a small delay.
+                    time.sleep(0.05) # Small delay to prevent flooding the serial buffer
+                    self._log(f"Sent line {line_num}: {line}", "white")
+
+            self._log(f"Finished sending file: {file_path}", "green")
+        except Exception as e:
+            self._log(f"Error sending G-code file: {e}", "red")
 
     def _clear_output(self):
         self.output.config(state="normal")
