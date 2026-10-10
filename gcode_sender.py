@@ -101,6 +101,8 @@ class GCodeSender(tk.Tk):
         self.command_history = []
         self._history_index = 0
         self._history_edit_buffer = ""
+        self.ok_received_event = threading.Event()
+        self.sending_file = False
 
         self._build_ui()
 
@@ -254,6 +256,8 @@ class GCodeSender(tk.Tk):
                         line = line.strip()
                         if line:
                             self._log(line, "lime")
+                            if "ok" in line.lower():
+                                self.ok_received_event.set() # Signal that 'ok' was received
             except serial.SerialException:
                 break
             except Exception:
@@ -323,8 +327,16 @@ class GCodeSender(tk.Tk):
         header_frame.pack(fill="x", padx=6, pady=(6, 0))
         ttk.Label(header_frame, text="Commands", font=("Segoe UI", 10, "bold")).pack(side="left")
         ttk.Button(header_frame, text="Clear Output", command=self._clear_output).pack(side="right")
-        ttk.Button(header_frame, text="Send Selected", command=lambda: self._send_selected(tree)).pack(side="right", padx=(0, 6))
-        ttk.Button(header_frame, text="Send File", command=self._send_file_dialog).pack(side="right", padx=(0, 6))
+        self.stop_send_btn = ttk.Button(header_frame, text="Stop Send", command=self._stop_sending_file, state="disabled")
+        self.stop_send_btn.pack(side="right", padx=(0, 6))
+        self.send_selected_btn = ttk.Button(header_frame, text="Send Selected", command=lambda: self._send_selected(tree))
+        self.send_selected_btn.pack(side="right", padx=(0, 6))
+        self.send_file_btn = ttk.Button(header_frame, text="Send File", command=self._send_file_dialog)
+        self.send_file_btn.pack(side="right", padx=(0, 6))
+
+        self.progress_bar = ttk.Progressbar(header_frame, orient="horizontal", length=100, mode="determinate")
+        self.progress_bar.pack(side="left", fill="x", expand=True, padx=(6,0))
+        self.progress_bar.pack_forget() # Hide initially
 
         outer = ttk.Frame(parent)
         outer.pack(fill="both", expand=True, padx=6, pady=6)
@@ -382,32 +394,83 @@ class GCodeSender(tk.Tk):
             filetypes=[("G-code files", "*.gcode"), ("All files", "*.* * ")]
         )
         if file_path:
+            self.sending_file = True
+            self.send_file_btn.config(state="disabled")
+            self.send_selected_btn.config(state="disabled")
+            self.stop_send_btn.config(state="normal")
+            self.progress_bar.pack(side="left", fill="x", expand=True, padx=(6,0))
+            self.progress_bar['value'] = 0
             self._log(f"Sending file: {file_path}", "orange")
             threading.Thread(target=self._send_gcode_file, args=(file_path,), daemon=True).start()
 
     def _send_gcode_file(self, file_path):
         if not self.serial_port or not self.serial_port.is_open:
             self._log("Not connected. Cannot send G-code file.", "red")
+            self._reset_file_sending_ui()
             return
 
+        total_lines = 0
+        try:
+            with open(file_path, 'r') as f:
+                # Count only lines that are not empty, comments, or program start/end markers
+                for line in f:
+                    stripped_line = line.strip()
+                    if stripped_line and not stripped_line.startswith(';') and not stripped_line.startswith('%'):
+                        total_lines += 1
+        except Exception as e:
+            self._log(f"Error reading file for line count: {e}", "red")
+            self._reset_file_sending_ui()
+            return
+
+        sent_lines = 0
         try:
             with open(file_path, 'r') as f:
                 for line_num, line in enumerate(f, 1):
+                    if not self.sending_file:
+                        self._log("File sending stopped by user.", "orange")
+                        break
+
                     line = line.strip()
                     if not line or line.startswith(';') or line.startswith('%'):
                         continue # Skip empty lines, comments, and program start/end markers
-                    # Strip comments
-                    line = line.split(";")[0].strip()
-                    # Basic buffering: send line by line and wait for response before sending next
+
+                    # Strip comments (e.g., G0 X10 Y10 ; move to X10 Y10)
+                    line = line.split(';')[0].strip()
+
+                    # Basic buffering: send line by line and wait for 'ok' response from printer
                     self._send_gcode(line)
-                    # A more robust solution would involve checking for 'ok' in the serial reader loop
-                    # and managing a send buffer. For now, a small delay.
-                    time.sleep(0.05) # Small delay to prevent flooding the serial buffer
                     self._log(f"Sent line {line_num}: {line}", "white")
 
-            self._log(f"Finished sending file: {file_path}", "green")
+                    # Update progress
+                    sent_lines += 1
+                    if total_lines > 0:
+                        progress_percent = (sent_lines / total_lines) * 100
+                        self.after(0, lambda: self.progress_bar.config(value=progress_percent))
+
+                    # Wait for 'ok' response from the printer with a timeout
+                    self.ok_received_event.clear() # Clear event before waiting for next 'ok'
+                    if not self.ok_received_event.wait(timeout=5):
+                        self._log(f"Warning: No 'ok' received for line {line_num}. Printer buffer might be full or device unresponsive. Continuing...", "red")
+                        # For now, we'll continue but warn the user
+
+            if self.sending_file: # Only log success if not stopped by user
+                self._log(f"Finished sending file: {file_path}", "green")
         except Exception as e:
             self._log(f"Error sending G-code file: {e}", "red")
+        finally:
+            self._reset_file_sending_ui()
+
+    def _stop_sending_file(self):
+        self.sending_file = False
+        self._log("Stopping file transfer...", "orange")
+
+    def _reset_file_sending_ui(self):
+        # Schedule UI updates to run on the main thread
+        self.after(0, lambda: self.send_file_btn.config(state="normal"))
+        self.after(0, lambda: self.send_selected_btn.config(state="normal"))
+        self.after(0, lambda: self.stop_send_btn.config(state="disabled"))
+        self.after(0, lambda: self.progress_bar.pack_forget())
+        self.after(0, lambda: self.progress_bar.config(value=0))
 
     def _clear_output(self):
         self.output.config(state="normal")
